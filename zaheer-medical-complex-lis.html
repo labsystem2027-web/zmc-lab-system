@@ -299,10 +299,8 @@ function ageToDays(age, unit){
   return n*365.25; // years (default)
 }
 // Shared age-band cutoffs (in days) used by age-dependent CBC parameters, oldest boundary last (Infinity = Adult).
-// Bands: NB(Day1) | 2-3 Days | 7-14 Days | 14-30 Days | 1-2 Month | 3 Month-1 Year* | 1-2 Year | 2-6 Year | 6-12 Year | Adult(>12 Year)
-// *NOTE: no reference sheet was provided for 6 month-1 year specifically, so that gap currently uses the
-// 3-6 Month values extended to 1 year. Give Claude the 6-12 month CBC performa if you have one, to refine this band.
-const CBC_AGE_BAND_CUTOFFS = [1, 6, 13, 29, 89, 365, 730, 2190, 4380, Infinity];
+// Bands: NB(Day1) | 2-3 Days | 7-14 Days | 14-30 Days | 1-2 Month | 3-6 Month | 6 Month-1 Year | 1-2 Year | 2-6 Year | 6-12 Year | Adult(>12 Year)
+const CBC_AGE_BAND_CUTOFFS = [1, 6, 13, 29, 89, 180, 365, 730, 2190, 4380, Infinity];
 function bandify(pairs){
   return pairs.map((lh,i)=>({ maxDays:CBC_AGE_BAND_CUTOFFS[i], low:lh[0], high:lh[1] }));
 }
@@ -323,42 +321,42 @@ const TEST_CATALOG = [
   { id:"cbc", category:"Complete Blood Picture (CBC)", hasUnitsColumn:true, printGroupLabel:"Haematology", sections:[
     { title:"", params:[
       { id:"cbc_tlc", name:"T.L.C.", type:"numeric", unit:"x10⁹/l", ageBands: bandify([
-        [10.0,26.0],[7.0,23.0],[6.0,22.0],[6.0,22.0],[5.0,19.0],[6.0,18.0],[6.0,16.0],[5.0,15.0],[5.0,13.0],[4.0,10.0]
+        [10.0,26.0],[7.0,23.0],[6.0,22.0],[6.0,22.0],[5.0,19.0],[6.0,18.0],[6.0,17.5],[6.0,16.0],[5.0,15.0],[5.0,13.0],[4.0,10.0]
       ])},
       { id:"cbc_rbc", name:"Red Cell Count", type:"numeric", unit:"x10¹²/l", ageBands: bandify([
-        [5.00,7.0],[4.00,6.6],[3.9,6.3],[3.60,6.20],[3.00,5.40],[4.1,5.3],[3.9,5.1],[4.0,5.2],[4.00,5.20],[4.00,5.20]
+        [5.00,7.0],[4.00,6.6],[3.9,6.3],[3.60,6.20],[3.00,5.40],[4.1,5.3],[4.0,5.2],[3.9,5.1],[4.0,5.2],[4.00,5.20],[4.00,5.20]
       ])},
       { id:"cbc_hb", name:"Haemoglobin", type:"numeric", unit:"g/dl", ageBands: bandify([
-        [14.0,22.0],[15.0,21.0],[13.5,21.5],[12.5,20.5],[11.5,16.5],[11.1,14.1],[11.1,14.1],[11.0,14.0],[11.5,15.5],[12.0,15.0]
+        [14.0,22.0],[15.0,21.0],[13.5,21.5],[12.5,20.5],[11.5,16.5],[11.1,14.1],[10.5,13.5],[11.1,14.1],[11.0,14.0],[11.5,15.5],[12.0,15.0]
       ])},
       { id:"cbc_pcv", name:"PCV / HCT", type:"numeric", unit:"%", ageBands: bandify([
-        [45.0,75.0],[45.0,67.0],[42.0,66.0],[31.0,71.0],[33.0,53.0],[30.0,40.0],[30.0,38.0],[34.0,40.0],[35.0,45.0],[34.0,40.0]
+        [45.0,75.0],[45.0,67.0],[42.0,66.0],[31.0,71.0],[33.0,53.0],[30.0,40.0],[31.0,39.0],[30.0,38.0],[34.0,40.0],[35.0,45.0],[34.0,40.0]
       ])},
       { id:"cbc_mcv", name:"MCV", type:"numeric", unit:"fl", ageBands: bandify([
-        [100.0,120.0],[92.0,118.0],[88.0,126.0],[86.0,124.0],[92.0,116.0],[68.0,84.0],[72.0,84.0],[75.0,87.0],[77.0,95.0],[75.0,87.0]
+        [100.0,120.0],[92.0,118.0],[88.0,126.0],[86.0,124.0],[92.0,116.0],[68.0,84.0],[70.0,84.0],[72.0,84.0],[75.0,87.0],[77.0,95.0],[75.0,87.0]
       ])},
       { id:"cbc_mch", name:"MCH", type:"numeric", unit:"pg", ageBands: bandify([
-        [31.0,37.0],[31.0,37.0],[31.0,37.0],[31.0,37.0],[30.0,36.0],[24.0,30.0],[25.0,29.0],[24.0,30.0],[23.0,33.0],[24.0,30.0]
+        [31.0,37.0],[31.0,37.0],[31.0,37.0],[31.0,37.0],[30.0,36.0],[24.0,30.0],[24.0,30.0],[25.0,29.0],[24.0,30.0],[23.0,33.0],[24.0,30.0]
       ])},
       { id:"cbc_mchc", name:"MCHC", type:"numeric", unit:"g/dl", ageBands: bandify([
-        [30.0,36.0],[29.0,37.0],[28.0,38.0],[28.0,38.0],[29.0,37.0],[30.0,36.0],[32.0,36.0],[31.0,37.0],[31.0,37.0],[31.0,37.0]
+        [30.0,36.0],[29.0,37.0],[28.0,38.0],[28.0,38.0],[29.0,37.0],[30.0,36.0],[30.0,36.0],[32.0,36.0],[31.0,37.0],[31.0,37.0],[31.0,37.0]
       ])},
       { id:"cbc_plt", name:"Platelet Count", type:"numeric", unit:"x10⁹/l", ageBands: bandify([
-        [100,450],[210,500],[160,500],[170,500],[200,500],[200,550],[200,550],[200,490],[170,450],[150,425]
+        [100,450],[210,500],[160,500],[170,500],[200,500],[200,550],[200,550],[200,550],[200,490],[170,450],[150,425]
       ])}
     ]},
     { title:"DIFF. LEUC. COUNT", params:[
       { id:"cbc_neut", name:"Neutrophils", type:"numeric", unit:"%", ageBands: bandify([
-        [32,62],[23,45],[19,49],[23,45],[15,35],[13,33],[15,35],[23,45],[32,61],[23,45]
+        [32,62],[23,45],[19,49],[23,45],[15,35],[13,33],[15,35],[15,35],[23,45],[32,61],[23,45]
       ])},
       { id:"cbc_lymph", name:"Lymphocytes", type:"numeric", unit:"%", ageBands: bandify([
-        [19,29],[35,65],[26,36],[35,65],[43,53],[41,71],[45,76],[35,65],[28,48],[35,65]
+        [19,29],[35,65],[26,36],[35,65],[43,53],[41,71],[42,74],[45,76],[35,65],[28,48],[35,65]
       ])},
       { id:"cbc_mono", name:"Monocytes", type:"numeric", unit:"%", ageBands: bandify([
-        [6,18],[4,10],[7,18],[4,18],[4,16],[4,14],[4,12],[4,10],[4,10],[4,10]
+        [6,18],[4,10],[7,18],[4,18],[4,16],[4,14],[4,12],[4,12],[4,10],[4,10],[4,10]
       ])},
       { id:"cbc_eos", name:"Eosinophils", type:"numeric", unit:"%", ageBands: bandify([
-        [0,2],[0,3],[0,2],[0,2],[0,2],[0,3],[0,3],[0,3],[0,3],[0,3]
+        [0,2],[0,3],[0,2],[0,2],[0,2],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3]
       ])}
     ]}
   ]},
@@ -717,14 +715,6 @@ const TEST_CATALOG = [
       { id:"thy_t3", name:"T3", type:"numeric", unit:"ng/dl", low:70, high:204, ref:"Cord blood: 5-141\n1-30 days: 100-740\n1-11 month: 105-245\nChildren & Adults: 70-204" },
       { id:"thy_t4", name:"T4", type:"numeric", unit:"ng/dl", low:4.6, high:11, ref:"Cord blood: 7.4-13\n1-3 days: 12-23\n1-2 week: 9.9-17\n1-4 months: 7.8-16\n4-12 months: 5.6-15\nChildren: 5.6-15\nAdults: 4.6-11" },
       { id:"thy_tsh", name:"TSH", type:"numeric", unit:"uIU/mL", low:0.4, high:6.4, ref:"Premature: 0.7-27\nCord blood: 2.3-13.2\n1-4 days: 1.0-39\n2-20 week: 1.7-9.1\n21 wk-20 yrs: 0.7-6.4\n21-54 yrs: 0.4-4.5\n55-87 yrs: 0.5-8.9" }
-    ]}
-  ]},
-
-  { id:"thyroid_profile_idc", category:"Thyroid Profile — IDC (T3, T4, TSH)", hasUnitsColumn:true, printGroupLabel:"Special Chemistry", sections:[
-    { title:"Special Chemistry", params:[
-      { id:"thyidc_t3", name:"T3", type:"numeric", unit:"ng/mL", low:1.19, high:2.41, ref:"1.19 – 2.41" },
-      { id:"thyidc_t4", name:"T4", type:"numeric", unit:"ng/dL", low:6.8, high:13.5, ref:"6.8 – 13.5" },
-      { id:"thyidc_tsh", name:"TSH", type:"numeric", unit:"uIU/ml", low:0.70, high:6.4, ref:"0.70 – 6.4" }
     ]}
   ]},
 
