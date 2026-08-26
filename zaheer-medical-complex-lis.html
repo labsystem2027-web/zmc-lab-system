@@ -100,9 +100,9 @@
   /* Print */
   .print-only{display:none;}
   @media print{
-    @page{ size: portrait; margin: 12mm; }
+    @page{ size: portrait; margin: 0mm; } /* margin:0 stops Chrome/Edge reserving space for their own date/URL header-footer */
     .no-print{display:none !important;}
-    .print-only{display:block !important;}
+    .print-only{display:block !important; padding:12mm;} /* recreate the visual margin ourselves, inside the page */
     body{background:#fff; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
     img{-webkit-print-color-adjust:exact; print-color-adjust:exact;}
     .rpt-slide, .rpt-results, .rpt-hdrtable, .rpt-header{max-width:100%;}
@@ -111,8 +111,9 @@
     .rpt-footer{}
   }
   .rpt-slide{position:relative; padding:2px;}
-  .rpt-header{display:flex; align-items:center; justify-content:center; gap:16px; margin-bottom:14px;}
-  .rpt-logo{width:64px; height:auto; flex-shrink:0; margin-right:4px;}
+  .rpt-header{display:flex; align-items:center; justify-content:center; gap:16px; margin-bottom:14px; position:relative;}
+  .rpt-qr{position:absolute; right:0; top:0; text-align:center;}
+  .rpt-logo{width:100px; height:auto; flex-shrink:0; margin-right:4px;}
   .rpt-header-text{text-align:center;}
   .rpt-en{font-size:22px; font-weight:700; letter-spacing:0.3px; color:#000; text-decoration:underline; text-underline-offset:4px;}
   .rpt-addr{font-size:13px; color:#000; margin-top:4px;}
@@ -209,7 +210,9 @@ try{
 
 // Pushes the finished report (as ready-to-display HTML) to the cloud, keyed by MR number,
 // so the patient-portal.html page can look it up. Silently skipped if Firebase isn't configured yet.
-async function syncOrderToCloud(order){
+// `silent`=true is used for automatic/background attempts — no popup on failure, just marks
+// the order as unsynced so the background retry loop picks it up again later.
+async function syncOrderToCloud(order, silent){
   if(!cloudDb) return;
   const mrKey = (order.mrNo||"").trim();
   if(!mrKey) return;
@@ -223,13 +226,35 @@ async function syncOrderToCloud(order){
       html: html,
       updatedAt: new Date().toISOString()
     });
-    showStorageBanner("warn", "☁ Report synced online — patient can now view it by MR number.");
-    setTimeout(()=> hideStorageBanner("warn"), 3500);
+    order.synced = true;
+    persistOrders();
+    if(!silent){
+      showStorageBanner("warn", "☁ Report synced online — patient can now view it by MR number.");
+      setTimeout(()=> hideStorageBanner("warn"), 3500);
+    }
   }catch(e){
     console.error("Cloud sync failed:", e);
-    alert("⚠ Online sync failed (check your internet connection). The report is still safely saved locally — press 'Sync Online' to try again.");
+    order.synced = false;
+    persistOrders();
+    if(!silent){
+      alert("⚠ Online sync failed (check your internet connection). The report is still safely saved locally — it will sync automatically once you're back online, or press 'Sync Online' to try again now.");
+    }
   }
 }
+
+// ---------------- Background auto-sync ----------------
+// Quietly retries any completed report that hasn't made it to the cloud yet — runs on
+// startup, whenever the device regains internet, and every 30s while the app is open.
+// This removes the need to press "Sync Online" manually after every report.
+async function autoSyncPendingOrders(){
+  if(!cloudDb) return;
+  const pending = (state.orders||[]).filter(o=> o.status==="completed" && o.synced!==true);
+  for(const order of pending){
+    await syncOrderToCloud(order, true);
+  }
+}
+window.addEventListener("online", ()=> autoSyncPendingOrders());
+setInterval(autoSyncPendingOrders, 30000);
 
 // ---------------- Auto-cleanup: keeps Firestore's free 1GB storage from ever filling up ----------------
 // Free plan gives 1GB. Reports average ~7-8KB each, so 1GB holds roughly 130,000 reports.
@@ -299,17 +324,33 @@ function ageToDays(age, unit){
   return n*365.25; // years (default)
 }
 // Shared age-band cutoffs (in days) used by age-dependent CBC parameters, oldest boundary last (Infinity = Adult).
-// Bands: NB(Day1) | 2-3 Days | 7-14 Days | 14-30 Days | 1-2 Month | 3-6 Month | 6 Month-1 Year | 1-2 Year | 2-6 Year | 6-12 Year | Adult(>12 Year)
-const CBC_AGE_BAND_CUTOFFS = [1, 6, 13, 29, 89, 180, 365, 730, 2190, 4380, Infinity];
+// Bands: NB(Day1) | 2-3 Days | 7-14 Days | 14-30 Days | 1-2 Month | 3 Month-1 Year* | 1-2 Year | 2-6 Year | 6-12 Year | Adult(>12 Year)
+// *NOTE: no reference sheet was provided for 6 month-1 year specifically, so that gap currently uses the
+// 3-6 Month values extended to 1 year. Give Claude the 6-12 month CBC performa if you have one, to refine this band.
+const CBC_AGE_BAND_CUTOFFS = [1, 6, 13, 29, 89, 365, 730, 2190, 4380, Infinity];
 function bandify(pairs){
   return pairs.map((lh,i)=>({ maxDays:CBC_AGE_BAND_CUTOFFS[i], low:lh[0], high:lh[1] }));
 }
+function isFemale(order){
+  return ((order && order.gender)||"").trim().toUpperCase().startsWith("F");
+}
 function resolveParam(p, order){
+  // Gender-only split (no age dependency) — e.g. CPK, ESR, Uric Acid
+  if(p.genderBands){
+    const gb = isFemale(order) ? p.genderBands.F : p.genderBands.M;
+    if(gb) return Object.assign({}, p, { low:gb.low, high:gb.high, ref: gb.ref || `${gb.low} – ${gb.high}` });
+    return p;
+  }
   if(!p.ageBands) return p;
   const days = ageToDays(order && order.age, order && order.ageUnit);
   let band = p.ageBands[p.ageBands.length-1]; // default: Adult band, if age missing/unparsable
   if(days!==null){
     band = p.ageBands.find(b=>days<=b.maxDays) || p.ageBands[p.ageBands.length-1];
+  }
+  // Some age bands (e.g. Ferritin's adult band) additionally split by gender
+  if(band.byGender){
+    const gb = isFemale(order) ? band.byGender.F : band.byGender.M;
+    return Object.assign({}, p, { low:gb.low, high:gb.high, ref: gb.ref || `${gb.low} – ${gb.high}` });
   }
   return Object.assign({}, p, { low:band.low, high:band.high, ref:`${band.low} – ${band.high}` });
 }
@@ -321,42 +362,42 @@ const TEST_CATALOG = [
   { id:"cbc", category:"Complete Blood Picture (CBC)", hasUnitsColumn:true, printGroupLabel:"Haematology", sections:[
     { title:"", params:[
       { id:"cbc_tlc", name:"T.L.C.", type:"numeric", unit:"x10⁹/l", ageBands: bandify([
-        [10.0,26.0],[7.0,23.0],[6.0,22.0],[6.0,22.0],[5.0,19.0],[6.0,18.0],[6.0,17.5],[6.0,16.0],[5.0,15.0],[5.0,13.0],[4.0,10.0]
+        [10.0,26.0],[7.0,23.0],[6.0,22.0],[6.0,22.0],[5.0,19.0],[6.0,18.0],[6.0,16.0],[5.0,15.0],[5.0,13.0],[4.0,10.0]
       ])},
       { id:"cbc_rbc", name:"Red Cell Count", type:"numeric", unit:"x10¹²/l", ageBands: bandify([
-        [5.00,7.0],[4.00,6.6],[3.9,6.3],[3.60,6.20],[3.00,5.40],[4.1,5.3],[4.0,5.2],[3.9,5.1],[4.0,5.2],[4.00,5.20],[4.00,5.20]
+        [5.00,7.0],[4.00,6.6],[3.9,6.3],[3.60,6.20],[3.00,5.40],[4.1,5.3],[3.9,5.1],[4.0,5.2],[4.00,5.20],[4.00,5.20]
       ])},
       { id:"cbc_hb", name:"Haemoglobin", type:"numeric", unit:"g/dl", ageBands: bandify([
-        [14.0,22.0],[15.0,21.0],[13.5,21.5],[12.5,20.5],[11.5,16.5],[11.1,14.1],[10.5,13.5],[11.1,14.1],[11.0,14.0],[11.5,15.5],[12.0,15.0]
+        [14.0,22.0],[15.0,21.0],[13.5,21.5],[12.5,20.5],[11.5,16.5],[11.1,14.1],[11.1,14.1],[11.0,14.0],[11.5,15.5],[12.0,15.0]
       ])},
       { id:"cbc_pcv", name:"PCV / HCT", type:"numeric", unit:"%", ageBands: bandify([
-        [45.0,75.0],[45.0,67.0],[42.0,66.0],[31.0,71.0],[33.0,53.0],[30.0,40.0],[31.0,39.0],[30.0,38.0],[34.0,40.0],[35.0,45.0],[34.0,40.0]
+        [45.0,75.0],[45.0,67.0],[42.0,66.0],[31.0,71.0],[33.0,53.0],[30.0,40.0],[30.0,38.0],[34.0,40.0],[35.0,45.0],[34.0,40.0]
       ])},
       { id:"cbc_mcv", name:"MCV", type:"numeric", unit:"fl", ageBands: bandify([
-        [100.0,120.0],[92.0,118.0],[88.0,126.0],[86.0,124.0],[92.0,116.0],[68.0,84.0],[70.0,84.0],[72.0,84.0],[75.0,87.0],[77.0,95.0],[75.0,87.0]
+        [100.0,120.0],[92.0,118.0],[88.0,126.0],[86.0,124.0],[92.0,116.0],[68.0,84.0],[72.0,84.0],[75.0,87.0],[77.0,95.0],[75.0,87.0]
       ])},
       { id:"cbc_mch", name:"MCH", type:"numeric", unit:"pg", ageBands: bandify([
-        [31.0,37.0],[31.0,37.0],[31.0,37.0],[31.0,37.0],[30.0,36.0],[24.0,30.0],[24.0,30.0],[25.0,29.0],[24.0,30.0],[23.0,33.0],[24.0,30.0]
+        [31.0,37.0],[31.0,37.0],[31.0,37.0],[31.0,37.0],[30.0,36.0],[24.0,30.0],[25.0,29.0],[24.0,30.0],[23.0,33.0],[24.0,30.0]
       ])},
       { id:"cbc_mchc", name:"MCHC", type:"numeric", unit:"g/dl", ageBands: bandify([
-        [30.0,36.0],[29.0,37.0],[28.0,38.0],[28.0,38.0],[29.0,37.0],[30.0,36.0],[30.0,36.0],[32.0,36.0],[31.0,37.0],[31.0,37.0],[31.0,37.0]
+        [30.0,36.0],[29.0,37.0],[28.0,38.0],[28.0,38.0],[29.0,37.0],[30.0,36.0],[32.0,36.0],[31.0,37.0],[31.0,37.0],[31.0,37.0]
       ])},
       { id:"cbc_plt", name:"Platelet Count", type:"numeric", unit:"x10⁹/l", ageBands: bandify([
-        [100,450],[210,500],[160,500],[170,500],[200,500],[200,550],[200,550],[200,550],[200,490],[170,450],[150,425]
+        [100,450],[210,500],[160,500],[170,500],[200,500],[200,550],[200,550],[200,490],[170,450],[150,425]
       ])}
     ]},
     { title:"DIFF. LEUC. COUNT", params:[
       { id:"cbc_neut", name:"Neutrophils", type:"numeric", unit:"%", ageBands: bandify([
-        [32,62],[23,45],[19,49],[23,45],[15,35],[13,33],[15,35],[15,35],[23,45],[32,61],[23,45]
+        [32,62],[23,45],[19,49],[23,45],[15,35],[13,33],[15,35],[23,45],[32,61],[23,45]
       ])},
       { id:"cbc_lymph", name:"Lymphocytes", type:"numeric", unit:"%", ageBands: bandify([
-        [19,29],[35,65],[26,36],[35,65],[43,53],[41,71],[42,74],[45,76],[35,65],[28,48],[35,65]
+        [19,29],[35,65],[26,36],[35,65],[43,53],[41,71],[45,76],[35,65],[28,48],[35,65]
       ])},
       { id:"cbc_mono", name:"Monocytes", type:"numeric", unit:"%", ageBands: bandify([
-        [6,18],[4,10],[7,18],[4,18],[4,16],[4,14],[4,12],[4,12],[4,10],[4,10],[4,10]
+        [6,18],[4,10],[7,18],[4,18],[4,16],[4,14],[4,12],[4,10],[4,10],[4,10]
       ])},
       { id:"cbc_eos", name:"Eosinophils", type:"numeric", unit:"%", ageBands: bandify([
-        [0,2],[0,3],[0,2],[0,2],[0,2],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3]
+        [0,2],[0,3],[0,2],[0,2],[0,2],[0,3],[0,3],[0,3],[0,3],[0,3]
       ])}
     ]}
   ]},
@@ -369,7 +410,7 @@ const TEST_CATALOG = [
 
   { id:"cpk", category:"CPK (Creatine Phosphokinase)", hasUnitsColumn:true, printGroupLabel:"Special Chemistry", sections:[
     { title:"Special Chemistry", params:[
-      { id:"cpk_val", name:"CPK", type:"numeric", unit:"u/l", low:0, high:190, ref:"Male: Upto 190\nFemale: Upto 165" }
+      { id:"cpk_val", name:"CPK", type:"numeric", unit:"u/l", genderBands:{ M:{low:0,high:190,ref:"Upto 190 (Male)"}, F:{low:0,high:165,ref:"Upto 165 (Female)"} } }
     ]}
   ]},
 
@@ -394,7 +435,7 @@ const TEST_CATALOG = [
 
   { id:"esr", category:"ESR (Erythrocyte Sedimentation Rate)", hasUnitsColumn:true, printGroupLabel:"Hematology", sections:[
     { title:"Hematology", params:[
-      { id:"esr_val", name:"ESR", type:"numeric", unit:"mm/1st Half hour", low:0, high:20, ref:"Males: 0 – 15\nFemales: 0 – 20" }
+      { id:"esr_val", name:"ESR", type:"numeric", unit:"mm/1st Half hour", genderBands:{ M:{low:0,high:15,ref:"0 – 15 (Male)"}, F:{low:0,high:20,ref:"0 – 20 (Female)"} } }
     ]}
   ]},
 
@@ -420,7 +461,13 @@ const TEST_CATALOG = [
 
   { id:"ferritin", category:"Serum Ferritin", hasUnitsColumn:true, printGroupLabel:"Special Chemistry", sections:[
     { title:"Special Chemistry", params:[
-      { id:"ferritin_val", name:"Serum Ferritin", type:"numeric", unit:"ng/ml", low:7, high:250, ref:"Newborn: 25-200 ng/ml\n01 month: 200-600 ng/ml\n02-05 month: 50-200 ng/ml\n06 month-15 years: 07-140 ng/ml\nAdult male: 20-250 ng/ml\nAdult Female: 10-120 ng/ml" }
+      { id:"ferritin_val", name:"Serum Ferritin", type:"numeric", unit:"ng/ml", ageBands:[
+        { maxDays:30, low:25, high:200, ref:"25 – 200 (Newborn)" },
+        { maxDays:60, low:200, high:600, ref:"200 – 600 (01 Month)" },
+        { maxDays:150, low:50, high:200, ref:"50 – 200 (02–05 Month)" },
+        { maxDays:5475, low:7, high:140, ref:"07 – 140 (06 Month–15 Years)" },
+        { maxDays:Infinity, byGender:{ M:{low:20,high:250,ref:"20 – 250 (Adult Male)"}, F:{low:10,high:120,ref:"10 – 120 (Adult Female)"} } }
+      ] }
     ]}
   ]},
 
@@ -458,6 +505,42 @@ const TEST_CATALOG = [
     ]}
   ]},
 
+  { id:"lft_alt_solo", category:"Serum ALT (SGPT)", hasUnitsColumn:true, printGroupLabel:"Chemistry", sections:[
+    { title:"Liver Function Test", params:[
+      { id:"alt_val", name:"Serum ALT (SGPT)", type:"numeric", unit:"U/l", low:0, high:43, ref:"Up to 43 U/l" }
+    ]}
+  ]},
+
+  { id:"lft_ast_solo", category:"Serum AST (GOT/AST)", hasUnitsColumn:true, printGroupLabel:"Chemistry", sections:[
+    { title:"Liver Function Test", params:[
+      { id:"ast_val", name:"Serum AST (GOT/AST)", type:"numeric", unit:"U/l", low:0, high:43, ref:"Up to 43 U/l" }
+    ]}
+  ]},
+
+  { id:"lft_alp_solo", category:"Serum ALP (Alkaline Phosphatase)", hasUnitsColumn:true, printGroupLabel:"Chemistry", sections:[
+    { title:"Liver Function Test", params:[
+      { id:"alp_val", name:"Serum ALP (Alkaline Phosphatase)", type:"numeric", unit:"U/l", low:0, high:270, ref:"Adults: < 270\nChildren: < 800" }
+    ]}
+  ]},
+
+  { id:"lft_alb_solo", category:"Serum Albumin", hasUnitsColumn:true, printGroupLabel:"Chemistry", sections:[
+    { title:"Liver Function Test", params:[
+      { id:"alb_val", name:"Serum Albumin", type:"numeric", unit:"g/dL", low:3.5, high:5.5, ref:"Adults: 3.5 – 5.5\nChildren: 2.5 – 4.5" }
+    ]}
+  ]},
+
+  { id:"rft_urea_solo", category:"Serum Urea", hasUnitsColumn:true, printGroupLabel:"Chemistry", sections:[
+    { title:"Renal Function Test", params:[
+      { id:"urea_val", name:"Serum Urea", type:"numeric", unit:"mg/dl", low:10, high:50, ref:"10 – 50" }
+    ]}
+  ]},
+
+  { id:"rft_creat_solo", category:"Serum Creatinine", hasUnitsColumn:true, printGroupLabel:"Chemistry", sections:[
+    { title:"Renal Function Test", params:[
+      { id:"creat_val", name:"Serum Creatinine", type:"numeric", unit:"mg/dl", low:0.2, high:1.2, ref:"0.2 – 1.2" }
+    ]}
+  ]},
+
   { id:"lft_rft", category:"LFT & RFT Panel", hasUnitsColumn:true, printGroupLabel:"Chemistry", sections:[
     { title:"Liver Function Test", params:[
       { id:"lft_alt", name:"Serum ALT (SGPT)", type:"numeric", unit:"U/l", low:0, high:43, ref:"Up to 43 U/l" },
@@ -469,7 +552,15 @@ const TEST_CATALOG = [
     { title:"Renal Function Test", params:[
       { id:"rft_urea", name:"Serum Urea", type:"numeric", unit:"mg/dl", low:10, high:50, ref:"10 – 50" },
       { id:"rft_creat", name:"Serum Creatinine", type:"numeric", unit:"mg/dl", low:0.2, high:1.2, ref:"0.2 – 1.2" },
-      { id:"rft_ua", name:"Serum Uric Acid", type:"numeric", unit:"mg/dl", low:2.4, high:7.0, ref:"M: 3.0 – 7.0\nF: 2.4 – 5.7" }
+      { id:"rft_ua", name:"Serum Uric Acid", type:"numeric", unit:"mg/dl", genderBands:{ M:{low:3.0,high:7.0,ref:"3.0 – 7.0 (Male)"}, F:{low:2.4,high:5.7,ref:"2.4 – 5.7 (Female)"} } }
+    ]}
+  ]},
+
+  { id:"stb", category:"Serum Bilirubin Profile (STB, Indirect, Direct)", hasUnitsColumn:true, printGroupLabel:"Chemistry", sections:[
+    { title:"Liver Function Test", params:[
+      { id:"stb_total", name:"Serum Total Bilirubin", type:"numeric", unit:"mg/dl", low:0, high:1.0, ref:"Adults: Upto 1.0\n0-2 Days: 1.4 – 11.45\n3-5 Days: 2.1 – 11.9" },
+      { id:"stb_indirect", name:"Serum Bilirubin Indirect", type:"numeric", unit:"mg/dl", low:0.1, high:0.75, ref:"Adult: 0.1 – 0.75\nNeonates: <11.75" },
+      { id:"stb_direct", name:"Serum Bilirubin direct", type:"numeric", unit:"mg/dl", low:0, high:0.25, ref:"Less than 0.25" }
     ]}
   ]},
 
@@ -578,11 +669,21 @@ const TEST_CATALOG = [
     ]}
   ]},
 
+  { id:"lft_standalone", category:"LFT (Liver Function Test)", hasUnitsColumn:true, printGroupLabel:"Chemistry", sections:[
+    { title:"Liver Function Test", params:[
+      { id:"lfts_alt", name:"Serum ALT (SGPT)", type:"numeric", unit:"U/l", low:0, high:43, ref:"Up to 43 U/l" },
+      { id:"lfts_ast", name:"Serum AST (GOT/AST)", type:"numeric", unit:"U/l", low:0, high:43, ref:"Up to 43 U/l" },
+      { id:"lfts_alp", name:"Serum ALP (Alkaline Phosphatase)", type:"numeric", unit:"U/l", low:0, high:270, ref:"Adults: < 270\nChildren: < 800" },
+      { id:"lfts_bili", name:"Serum Total Bilirubin", type:"numeric", unit:"mg/dl", low:0, high:1.0, ref:"Adults: Upto 1.0\n0-2 Days: 1.4 – 11.45\n3-5 Days: 2.1 – 11.9" },
+      { id:"lfts_alb", name:"Serum Albumin", type:"numeric", unit:"g/dL", low:3.5, high:5.5, ref:"Adults: 3.5 – 5.5\nChildren: 2.5 – 4.5" }
+    ]}
+  ]},
+
   { id:"rfts_standalone", category:"RFTs (Renal Function Test)", hasUnitsColumn:true, printGroupLabel:"Chemistry", sections:[
     { title:"Chemistry", params:[
       { id:"rfts2_creat", name:"Serum Creatinine", type:"numeric", unit:"mg/dl", low:0.2, high:1.2, ref:"0.2 – 1.2" },
       { id:"rfts2_urea", name:"Serum Urea", type:"numeric", unit:"mg/dl", low:10, high:50, ref:"10 – 50" },
-      { id:"rfts2_ua", name:"Serum Uric Acid", type:"numeric", unit:"mg/dl", low:2.4, high:7.0, ref:"M: 3.0 – 7.0\nF: 2.4 – 5.7" }
+      { id:"rfts2_ua", name:"Serum Uric Acid", type:"numeric", unit:"mg/dl", genderBands:{ M:{low:3.0,high:7.0,ref:"3.0 – 7.0 (Male)"}, F:{low:2.4,high:5.7,ref:"2.4 – 5.7 (Female)"} } }
     ]}
   ]},
 
@@ -634,6 +735,24 @@ const TEST_CATALOG = [
       { id:"semen_pus", name:"Pus Cells", type:"numeric", unit:"/HPF", low:0, high:5, ref:"< 5 /HPF" },
       { id:"semen_rbc", name:"RBCs", type:"text", default:"Nil" },
       { id:"semen_abnormal", name:"Abnormal Head & Neck Sperms", type:"text", default:"Nil" }
+    ]}
+  ]},
+
+  { id:"hiv_rapid", category:"HIV Screening (Rapid)", hasUnitsColumn:false, printGroupLabel:"Serology", comments:"Method: Rapid Immunochromatographic.", sections:[
+    { title:"Serology", params:[
+      { id:"hivr_val", name:"HIV", type:"select", options:["Negative","Positive"], normal:["Negative"], ref:"Negative" }
+    ]}
+  ]},
+
+  { id:"hbsag_rapid", category:"HBsAg (Rapid)", hasUnitsColumn:false, printGroupLabel:"Serology", comments:"Method: Rapid Immunochromatographic.", sections:[
+    { title:"Serology", params:[
+      { id:"hbsagr_val", name:"HBsAg", type:"select", options:["Negative","Positive"], normal:["Negative"], ref:"Negative" }
+    ]}
+  ]},
+
+  { id:"hcv_rapid", category:"Anti-HCV (Rapid)", hasUnitsColumn:false, printGroupLabel:"Serology", comments:"Method: Rapid Immunochromatographic.", sections:[
+    { title:"Serology", params:[
+      { id:"hcvr_val", name:"Anti HCV Ab", type:"select", options:["Negative","Positive"], normal:["Negative"], ref:"Negative" }
     ]}
   ]},
 
@@ -718,6 +837,14 @@ const TEST_CATALOG = [
     ]}
   ]},
 
+  { id:"thyroid_profile_idc", category:"Thyroid Profile — IDC (T3, T4, TSH)", hasUnitsColumn:true, printGroupLabel:"Special Chemistry", sections:[
+    { title:"Special Chemistry", params:[
+      { id:"thyidc_t3", name:"T3", type:"numeric", unit:"ng/mL", low:1.19, high:2.41, ref:"1.19 – 2.41" },
+      { id:"thyidc_t4", name:"T4", type:"numeric", unit:"ng/dL", low:6.8, high:13.5, ref:"6.8 – 13.5" },
+      { id:"thyidc_tsh", name:"TSH", type:"numeric", unit:"uIU/ml", low:0.70, high:6.4, ref:"0.70 – 6.4" }
+    ]}
+  ]},
+
   { id:"trop_t", category:"Troponin T (Trop T)", hasUnitsColumn:false, printGroupLabel:"Cardiac Enzymes", comments:"Determination of cardiac troponin T in blood.", sections:[
     { title:"Cardiac Enzymes", params:[
       { id:"trop_t_val", name:"Trop T", type:"select", options:["Negative","Positive"], normal:["Negative"], ref:"Negative" }
@@ -761,7 +888,7 @@ const TEST_CATALOG = [
 
   { id:"uric_acid", category:"Serum Uric Acid", hasUnitsColumn:true, printGroupLabel:"Chemistry", sections:[
     { title:"Chemistry", params:[
-      { id:"ua2_val", name:"Serum Uric Acid", type:"numeric", unit:"mg/dl", low:2.4, high:7.0, ref:"M: 3.0 – 7.0\nF: 2.4 – 5.7" }
+      { id:"ua2_val", name:"Serum Uric Acid", type:"numeric", unit:"mg/dl", genderBands:{ M:{low:3.0,high:7.0,ref:"3.0 – 7.0 (Male)"}, F:{low:2.4,high:5.7,ref:"2.4 – 5.7 (Female)"} } }
     ]}
   ]},
 
@@ -923,7 +1050,7 @@ function render(){
 function renderNewOrder(){
   const cats = TEST_CATALOG.map(cat=>{
     const count = cat.sections.reduce((n,s)=>n+s.params.length,0);
-    return `<label class="cat-item" id="cat-${cat.id}">
+    return `<label class="cat-item" id="cat-${cat.id}" data-name="${esc(cat.category).toLowerCase()}">
       <input type="checkbox" onchange="onCatToggle('${cat.id}')">
       <div><div class="name">${esc(cat.category)}</div><div class="count">${count} parameter${count!==1?"s":""}</div></div>
     </label>`;
@@ -958,15 +1085,34 @@ function renderNewOrder(){
         <div class="panel-title display">Select Test(s)</div>
         <button type="button" class="btn btn-outline" id="select-all-btn" style="padding:6px 12px; font-size:12.5px;" onclick="toggleAllCats()">Select All</button>
       </div>
+      <input id="test-search" type="text" placeholder="🔍 Search tests…" oninput="filterTestList()" style="width:100%; margin-top:8px; margin-bottom:2px;">
       <div class="panel-sub" id="cat-count">0 tests selected</div>
-      <div class="cat-list">${cats || '<div class="hint">No tests set up yet. Tell Claude which tests to add for Zaheer Medical Complex.</div>'}</div>
+      <div class="cat-list" id="cat-list">${cats || '<div class="hint">No tests set up yet. Tell Claude which tests to add for Zaheer Medical Complex.</div>'}</div>
+      <div class="hint" id="no-test-match" style="display:none;">No tests match your search.</div>
     </div>
   </div>`;
 }
 
+function filterTestList(){
+  const q = (document.getElementById("test-search")?.value || "").trim().toLowerCase();
+  const items = document.querySelectorAll("#cat-list .cat-item");
+  let anyVisible = false;
+  items.forEach(item=>{
+    const match = !q || (item.dataset.name || "").includes(q);
+    item.style.display = match ? "" : "none";
+    if(match) anyVisible = true;
+  });
+  const noMatch = document.getElementById("no-test-match");
+  if(noMatch) noMatch.style.display = (items.length && !anyVisible) ? "block" : "none";
+}
+
 function toggleAllCats(){
-  const allChecked = TEST_CATALOG.every(c=>document.getElementById("cat-"+c.id)?.classList.contains("checked"));
-  TEST_CATALOG.forEach(c=>{
+  const visibleCats = TEST_CATALOG.filter(c=>{
+    const label = document.getElementById("cat-"+c.id);
+    return label && label.style.display !== "none";
+  });
+  const allChecked = visibleCats.every(c=>document.getElementById("cat-"+c.id)?.classList.contains("checked"));
+  visibleCats.forEach(c=>{
     const label = document.getElementById("cat-"+c.id);
     if(!label) return;
     const checkbox = label.querySelector('input[type="checkbox"]');
@@ -984,7 +1130,11 @@ function toggleAllCats(){
 function updateSelectAllBtn(){
   const btn = document.getElementById("select-all-btn");
   if(!btn) return;
-  const allChecked = TEST_CATALOG.length>0 && TEST_CATALOG.every(c=>document.getElementById("cat-"+c.id)?.classList.contains("checked"));
+  const visibleCats = TEST_CATALOG.filter(c=>{
+    const label = document.getElementById("cat-"+c.id);
+    return label && label.style.display !== "none";
+  });
+  const allChecked = visibleCats.length>0 && visibleCats.every(c=>document.getElementById("cat-"+c.id)?.classList.contains("checked"));
   btn.textContent = allChecked ? "Clear All" : "Select All";
 }
 
@@ -1367,12 +1517,18 @@ function renderHistory(){
 }
 
 // ---------------- Print ----------------
+const ZMC_PORTAL_QR_IMG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAN4AAADeAQAAAAB6HIMaAAAB2ElEQVR4nO2YS27kMAxEn5sGsmQDORD7Zrkac5TcQF4OQKNmIXUym3w2g+YiRANtWJsHulgqaROf1nn5fA1+F79bRAPARgAQNgKf/Y7qSBuSTFmeJuEpySSNhrQXYNtugL29nNdXjtt5hWPbHwj0ae3r/7hZ5bnfBLzdHgj0I1o4r8PG9Xwem4/9cUDf0gp2qOfXm4u3TYCLoyHthyf8+wOaesKsEZKkBIr5rI60IzQCAleBlHjO9y1pKZeUkmoKw1NKvG1vMckGuEwJIWV1pbVBeZqyiPKUsutehiQ8IcqziAIb2KDrlFFQhEkmQcBUcldav39611LFiKa6VRaUZ62giE3d9uyt0pbfpmmNWN/ejrDZ3qnesWyhrd8WQJSvKI7nfOhIO+dryXWJobyz3wpPGyGJlceonhlsYMoZbGwmHM9pER1pJRsxc9fcxQpwNZ2yFb0Cl5Q2KNfahdvRXjg2PHfg2M4r5fn0tu3Hy+OAvqr72YECYEp3trpfb9/PZdN4Y07c0kM72gvE3BHO6+uT8s+VHYp4INAX9e5dAPd8S99zWXAXwLoQI6BtGp+0WsfJQbnmm360H3c1eHJsAo7N6mFAP/OEmNERz5lwWup2+73J/2+LfwHvFr4XhFbUdAAAAABJRU5ErkJggg==";
+
 function reportHeaderHtml(){
   return `<div class="rpt-header">
     <img class="rpt-logo" src="${ZMC_LOGO_IMG}">
     <div class="rpt-header-text">
       <div class="rpt-en">${HOSPITAL.nameEn}</div>
       <div class="rpt-addr">${HOSPITAL.address}</div>
+    </div>
+    <div class="rpt-qr">
+      <img src="${ZMC_PORTAL_QR_IMG}" style="width:70px;height:70px;">
+      <div style="font-size:8px;text-align:center;">Scan for Online Report</div>
     </div>
   </div>`;
 }
@@ -1398,7 +1554,7 @@ function patientBlockHtml(order, cat){
   const reportingDate = fmtShortDate(new Date());
   const groupTitle = ((cat.printGroupLabel||cat.category||"").trim()).toUpperCase();
   return `<table class="rpt-hdrtable">
-    <tr><td class="lbl">Lab Id</td><td class="val" colspan="5">${esc(order.mrNo)}</td></tr>
+    <tr><td class="lbl">MR Number</td><td class="val" colspan="5">${esc(order.mrNo)}</td></tr>
     <tr>
       <td class="lbl">Name</td><td class="val">${esc(order.name)}</td>
       <td class="lbl">Age</td><td class="val">${esc(order.age)?esc(order.age)+' '+ageUnitLabel(order.ageUnit,false):''}</td>
@@ -1503,9 +1659,28 @@ function waitForImages(container){
   }));
 }
 
-function printReport(){
+// Before printing, make sure the report has actually reached Firestore — this is what
+// lets the patient portal show it. If it hasn't synced yet, we try once right now (in case
+// internet just came back), and only let printing proceed if that succeeds.
+async function ensureSyncedBeforePrint(order){
+  if(order.synced === true) return true;
+  if(!cloudDb){
+    alert("⚠ Online system is not connected, so this report can't be confirmed as sent online yet. Printing is blocked until it syncs — please check your internet connection.");
+    return false;
+  }
+  showStorageBanner("warn", "☁ Syncing report online before printing…");
+  await syncOrderToCloud(order, true);
+  hideStorageBanner("warn");
+  if(order.synced === true) return true;
+  alert("⚠ This report hasn't reached the online system yet, so printing is blocked. Please connect to the internet and try again — the app will sync it automatically, or you can press 'Sync Online' first.");
+  return false;
+}
+
+async function printReport(){
   const order = getSelectedOrder();
   if(!order) return;
+  const ok = await ensureSyncedBeforePrint(order);
+  if(!ok) return;
   const reportHtml = buildReportHtml(order);
   document.getElementById("print-history").innerHTML = ""; // clear any leftover History print content
   const reportEl = document.getElementById("print-report");
@@ -1648,6 +1823,7 @@ if(sessionStorage.getItem("lab-unlocked") === "1"){
   checkStorageHealth();
   render();
   checkAndCleanupOldReports(); // quiet, once-a-day background check (no-op if Firebase isn't configured)
+  autoSyncPendingOrders(); // catch up on any reports that failed to sync last time the app was open
 })();
 
 if ("serviceWorker" in navigator){
